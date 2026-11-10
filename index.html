@@ -1,0 +1,1979 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>Personal Finance, Budget & Active Loan Portfolio Tracker</title>
+  
+  <!-- Tailwind CSS CDN with Class-based Dark Mode -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['var(--app-font)', 'Inter', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts: Inter, Plus Jakarta Sans (Dark mode font), Outfit (Light mode font) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- html2pdf Bundle for Direct Client-side PDF Downloads -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+  <!-- Firebase Modular SDKs -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { 
+      getAuth, 
+      onAuthStateChanged, 
+      signInWithEmailAndPassword, 
+      createUserWithEmailAndPassword, 
+      signOut,
+      setPersistence,
+      browserLocalPersistence
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { 
+      getFirestore, 
+      collection, 
+      addDoc, 
+      deleteDoc, 
+      doc, 
+      updateDoc,
+      onSnapshot, 
+      query, 
+      orderBy,
+      enableIndexedDbPersistence
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAI-hN5u3ASq7v17rek3BcVXZFPI6_INCM",
+      authDomain: "personal-finance-tracker-3746d.firebaseapp.com",
+      projectId: "personal-finance-tracker-3746d",
+      storageBucket: "personal-finance-tracker-3746d.firebasestorage.app",
+      messagingSenderId: "314792593403",
+      appId: "1:314792593403:web:d8462125fad8bde4042d5e",
+      measurementId: "G-MLTM0LJPJ9"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    setPersistence(auth, browserLocalPersistence).catch(err => {
+      console.warn("Auth persistence error:", err);
+    });
+
+    enableIndexedDbPersistence(db).catch(err => {
+      if (err.code === 'failed-precondition') {
+        console.warn("Multiple tabs open; persistence active in primary tab.");
+      } else if (err.code === 'unimplemented') {
+        console.warn("IndexedDB persistence not supported.");
+      }
+    });
+
+    window.fbAuth = auth;
+    window.fbDb = db;
+    window.fbMethods = {
+      signInWithEmailAndPassword,
+      createUserWithEmailAndPassword,
+      signOut,
+      collection,
+      addDoc,
+      deleteDoc,
+      doc,
+      updateDoc,
+      onSnapshot,
+      query,
+      orderBy
+    };
+
+    let unsubscribeTx = null;
+    let unsubscribeLoans = null;
+
+    onAuthStateChanged(auth, (user) => {
+      const authModal = document.getElementById('authModal');
+      const userBadge = document.getElementById('userNavBadge');
+      const userEmailText = document.getElementById('userEmailText');
+      const cloudStatusText = document.getElementById('cloudStatusText');
+      const cloudDot = document.getElementById('cloudDot');
+
+      if (user) {
+        authModal.classList.add('hidden');
+        userBadge.classList.remove('hidden');
+        userBadge.classList.add('flex');
+        userEmailText.textContent = user.email;
+        if (cloudStatusText) cloudStatusText.textContent = "Online";
+        if (cloudDot) cloudDot.className = "w-2 h-2 rounded-full bg-emerald-400 animate-pulse";
+
+        const cachedTx = localStorage.getItem('personal_finance_' + user.uid);
+        if (cachedTx) {
+          try { window.financeRecords = JSON.parse(cachedTx); } catch(e){}
+        }
+        const cachedLoans = localStorage.getItem('personal_loans_' + user.uid);
+        if (cachedLoans) {
+          try { window.activeLoans = JSON.parse(cachedLoans); } catch(e){}
+        }
+        window.updateDashboard();
+        window.renderLoansTracker();
+
+        const txRef = collection(db, 'users', user.uid, 'personal_finance_records');
+        const qTx = query(txRef, orderBy('date', 'desc'));
+        if (unsubscribeTx) unsubscribeTx();
+        unsubscribeTx = onSnapshot(qTx, (snapshot) => {
+          const list = [];
+          snapshot.forEach(docSnap => list.push({ id: docSnap.id, ...docSnap.data() }));
+          window.financeRecords = list;
+          localStorage.setItem('personal_finance_' + user.uid, JSON.stringify(list));
+          window.updateDashboard();
+          if (typeof window.populateAvailableMonths === 'function') window.populateAvailableMonths();
+        }, (err) => {
+          console.error("Firestore tx sync error:", err);
+          window.showToast("Sync error: check database security rules", "error");
+        });
+
+        const loansRef = collection(db, 'users', user.uid, 'active_loans');
+        const qLoans = query(loansRef, orderBy('createdAt', 'desc'));
+        if (unsubscribeLoans) unsubscribeLoans();
+        unsubscribeLoans = onSnapshot(qLoans, (snapshot) => {
+          const list = [];
+          snapshot.forEach(docSnap => list.push({ id: docSnap.id, ...docSnap.data() }));
+          window.activeLoans = list;
+          localStorage.setItem('personal_loans_' + user.uid, JSON.stringify(list));
+          window.renderLoansTracker();
+          window.populateLoanDropdown();
+        }, (err) => {
+          console.error("Firestore loan sync error:", err);
+          window.showToast("Sync error: check database security rules", "error");
+        });
+
+      } else {
+        if (unsubscribeTx) unsubscribeTx();
+        if (unsubscribeLoans) unsubscribeLoans();
+        authModal.classList.remove('hidden');
+        userBadge.classList.add('hidden');
+        userBadge.classList.remove('flex');
+        if (cloudStatusText) cloudStatusText.textContent = "Disconnected";
+        if (cloudDot) cloudDot.className = "w-2 h-2 rounded-full bg-amber-400";
+        window.financeRecords = [];
+        window.activeLoans = [];
+        window.updateDashboard();
+        window.renderLoansTracker();
+      }
+    });
+  </script>
+
+  <style>
+    :root {
+      --app-font: 'Outfit', sans-serif;
+    }
+    html.dark {
+      --app-font: 'Plus Jakarta Sans', sans-serif;
+    }
+
+    body {
+      font-family: var(--app-font);
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    @media print {
+      body * { visibility: hidden !important; }
+      #modalPreviewCanvas, #modalPreviewCanvas * { visibility: visible !important; }
+      #modalPreviewCanvas {
+        position: absolute !important;
+        left: 0 !important;
+        top: 0 !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 8mm !important;
+        background: #fff !important;
+        color: #000 !important;
+        border: none !important;
+        box-shadow: none !important;
+      }
+      .no-print { display: none !important; }
+    }
+
+    .custom-scrollbar::-webkit-scrollbar { height: 5px; width: 5px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #94a3b8; border-radius: 9999px; }
+
+    input, select, button {
+      font-size: 16px !important;
+    }
+    @media (min-width: 640px) {
+      input, select, button {
+        font-size: 0.875rem !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-stone-100 text-stone-800 dark:bg-slate-950 dark:text-slate-100 antialiased min-h-screen flex flex-col selection:bg-indigo-500 selection:text-white">
+
+  <!-- Header -->
+  <header class="bg-white dark:bg-slate-900 border-b border-stone-200 dark:border-slate-800 text-stone-900 dark:text-white sticky top-0 z-30 no-print shadow-sm transition-colors">
+    <div class="max-w-7xl mx-auto px-3.5 sm:px-6 py-2.5 sm:py-3.5 flex justify-between items-center gap-2">
+      <div class="flex items-center space-x-2 sm:space-x-3 min-w-0">
+        <div class="bg-indigo-600 text-white p-2 rounded-xl flex items-center justify-center shadow shrink-0">
+          <i data-lucide="wallet" class="w-5 h-5 sm:w-6 sm:h-6 stroke-[2.5]"></i>
+        </div>
+        <div class="truncate">
+          <h1 class="text-base sm:text-xl font-bold tracking-tight leading-tight flex items-center gap-1.5 truncate">
+            <span>FinManager</span>
+            <span class="text-[10px] bg-indigo-500/10 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 px-1.5 py-0.2 rounded-md font-medium">Cloud</span>
+          </h1>
+          <p class="text-[10px] sm:text-xs text-stone-500 dark:text-slate-400 truncate hidden xs:block">Finance & Loans</p>
+        </div>
+      </div>
+      
+      <!-- Right Toolbar -->
+      <div class="flex items-center space-x-1.5 sm:space-x-2 shrink-0">
+        <!-- THEME SWITCHER -->
+        <button onclick="toggleTheme()" id="themeToggleBtn" title="Toggle Light / Dark Mode" class="p-2 rounded-xl bg-stone-100 dark:bg-slate-800 border border-stone-300 dark:border-slate-700 text-stone-700 dark:text-amber-300 hover:scale-105 transition flex items-center justify-center">
+          <i id="themeIcon" data-lucide="sun" class="w-4 h-4"></i>
+        </button>
+
+        <!-- Dynamic Currency Selector -->
+        <div class="flex items-center bg-stone-100 dark:bg-slate-950 rounded-lg px-2 py-1 border border-stone-300 dark:border-slate-700">
+          <select id="currencySelect" class="bg-transparent text-stone-800 dark:text-white text-xs font-semibold focus:outline-none cursor-pointer">
+            <option value="Rs" class="text-stone-900">Rs (LKR)</option>
+            <option value="$" class="text-stone-900">$ (USD)</option>
+            <option value="€" class="text-stone-900">€ (EUR)</option>
+            <option value="£" class="text-stone-900">£ (GBP)</option>
+          </select>
+        </div>
+
+        <button onclick="openPrintModal()" class="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl transition shadow">
+          <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+          <span class="hidden sm:inline">Print & Export</span>
+        </button>
+
+        <div id="userNavBadge" class="hidden items-center gap-1.5 bg-stone-100 dark:bg-slate-800 border border-stone-300 dark:border-slate-700 rounded-lg px-2 py-1">
+          <i data-lucide="user" class="w-3.5 h-3.5 text-indigo-500 dark:text-indigo-400"></i>
+          <span id="userEmailText" class="text-xs max-w-[70px] sm:max-w-[120px] truncate font-medium text-stone-700 dark:text-slate-200 hidden sm:inline">User</span>
+          <button onclick="handleLogout()" title="Log Out" class="text-stone-400 dark:text-slate-400 hover:text-rose-500 p-0.5">
+            <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-grow max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-6 no-print">
+
+    <!-- Toast Notification -->
+    <div id="toastContainer" class="fixed top-14 sm:top-16 right-3 left-3 sm:left-auto sm:right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+    <!-- Filter Bar -->
+    <section class="bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl shadow-sm border border-stone-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
+      <div class="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 custom-scrollbar whitespace-nowrap">
+        <button onclick="setFilter('all')" id="btn-filter-all" class="filter-btn px-3 py-1.5 text-xs font-semibold rounded-xl border bg-indigo-600 text-white border-indigo-600 shadow-sm">All</button>
+        <button onclick="setFilter('today')" id="btn-filter-today" class="filter-btn px-3 py-1.5 text-xs font-medium rounded-xl border border-stone-300 dark:border-slate-700 text-stone-600 dark:text-slate-300 hover:bg-stone-100 dark:hover:bg-slate-800">Today</button>
+        <button onclick="setFilter('week')" id="btn-filter-week" class="filter-btn px-3 py-1.5 text-xs font-medium rounded-xl border border-stone-300 dark:border-slate-700 text-stone-600 dark:text-slate-300 hover:bg-stone-100 dark:hover:bg-slate-800">This Week</button>
+        <button onclick="setFilter('month')" id="btn-filter-month" class="filter-btn px-3 py-1.5 text-xs font-medium rounded-xl border border-stone-300 dark:border-slate-700 text-stone-600 dark:text-slate-300 hover:bg-stone-100 dark:hover:bg-slate-800">This Month</button>
+      </div>
+
+      <div class="flex items-center gap-1.5 text-xs flex-wrap">
+        <input type="date" id="filterStartDate" onchange="applyCustomRange()" class="bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg px-2 py-1 text-xs text-stone-800 dark:text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none flex-1">
+        <span class="text-stone-400 dark:text-slate-500">to</span>
+        <input type="date" id="filterEndDate" onchange="applyCustomRange()" class="bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg px-2 py-1 text-xs text-stone-800 dark:text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none flex-1">
+        <button onclick="clearCustomRange()" title="Clear Range" class="p-1 hover:bg-stone-100 dark:hover:bg-slate-800 rounded text-stone-500 dark:text-slate-400">
+          <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+    </section>
+
+    <!-- Overview Metric Cards -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
+      <div class="bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl border border-stone-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <span class="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Total Income</span>
+          <span class="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"><i data-lucide="trending-up" class="w-3.5 h-3.5 sm:w-4 sm:h-4"></i></span>
+        </div>
+        <div class="mt-1 sm:mt-2">
+          <div id="statIncome" class="text-base sm:text-2xl font-bold text-emerald-600 dark:text-emerald-400 truncate">Rs 0.00</div>
+          <p class="text-[10px] sm:text-[11px] text-stone-500 dark:text-slate-400 font-medium truncate" id="statIncomeCount">0 logs</p>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl border border-stone-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <span class="text-[11px] font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider">Living Costs</span>
+          <span class="p-1.5 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400"><i data-lucide="shopping-bag" class="w-3.5 h-3.5 sm:w-4 sm:h-4"></i></span>
+        </div>
+        <div class="mt-1 sm:mt-2">
+          <div id="statExpense" class="text-base sm:text-2xl font-bold text-amber-600 dark:text-amber-400 truncate">Rs 0.00</div>
+          <p class="text-[10px] sm:text-[11px] text-stone-500 dark:text-slate-400 font-medium truncate" id="statExpenseCount">0 logs</p>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl border border-stone-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <span class="text-[11px] font-semibold text-rose-600 dark:text-rose-400 uppercase tracking-wider">Remaining Debt</span>
+          <span class="p-1.5 rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400"><i data-lucide="landmark" class="w-3.5 h-3.5 sm:w-4 sm:h-4"></i></span>
+        </div>
+        <div class="mt-1 sm:mt-2">
+          <div id="statTotalRemainingDebt" class="text-base sm:text-2xl font-bold text-rose-600 dark:text-rose-400 truncate">Rs 0.00</div>
+          <p class="text-[10px] sm:text-[11px] text-stone-500 dark:text-slate-400 font-medium truncate" id="statActiveLoansCount">0 active</p>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 p-3 sm:p-4 rounded-2xl border border-stone-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+          <span class="text-[11px] font-semibold text-indigo-600 dark:text-indigo-300 uppercase tracking-wider">Net Savings</span>
+          <span id="balanceIconContainer" class="p-1.5 rounded-lg bg-indigo-500/10 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300"><i data-lucide="piggy-bank" class="w-3.5 h-3.5 sm:w-4 sm:h-4"></i></span>
+        </div>
+        <div class="mt-1 sm:mt-2">
+          <div id="statNetBalance" class="text-base sm:text-2xl font-bold text-indigo-600 dark:text-indigo-200 truncate">Rs 0.00</div>
+          <p id="statNetLabel" class="text-[10px] sm:text-[11px] text-stone-500 dark:text-slate-400 font-medium truncate">Retained balance</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Active Loans Portfolio Section -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl border border-stone-200 dark:border-slate-800 p-4 sm:p-5 space-y-3.5 shadow-sm">
+      <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2.5 border-b border-stone-200 dark:border-slate-800 pb-3">
+        <div>
+          <h2 class="text-sm sm:text-base font-bold text-stone-900 dark:text-white flex items-center gap-1.5">
+            <i data-lucide="pie-chart" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i>
+            Active Loans Status & Balances
+          </h2>
+          <p class="text-[11px] text-stone-500 dark:text-slate-400">Track paid amounts and remaining installments</p>
+        </div>
+        <button onclick="openNewLoanModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3 py-2 rounded-xl transition shadow flex items-center gap-1.5 self-start sm:self-auto">
+          <i data-lucide="plus-circle" class="w-4 h-4"></i> Add Loan / CC
+        </button>
+      </div>
+
+      <div id="loansCardsContainer" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      </div>
+    </section>
+
+    <!-- Forms, Simulator & Fixed Scroll Ledger -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+      
+      <!-- Left Column: Forms & Rate Simulator -->
+      <div class="lg:col-span-5 space-y-4">
+        
+        <!-- Add Entry Box -->
+        <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-stone-200 dark:border-slate-800 overflow-hidden">
+          <div class="flex border-b border-stone-200 dark:border-slate-800 bg-stone-50 dark:bg-slate-950/60 p-1.5 gap-1">
+            <button id="tabIncomeBtn" onclick="switchFormTab('income')" class="flex-1 py-2 px-1 rounded-xl font-bold text-xs flex items-center justify-center gap-1 bg-emerald-600 text-white shadow-sm">
+              <i data-lucide="plus-circle" class="w-3.5 h-3.5"></i> Income
+            </button>
+            <button id="tabExpenseBtn" onclick="switchFormTab('expense')" class="flex-1 py-2 px-1 rounded-xl font-bold text-xs flex items-center justify-center gap-1 text-stone-500 dark:text-slate-400 hover:bg-stone-200 dark:hover:bg-slate-800">
+              <i data-lucide="minus-circle" class="w-3.5 h-3.5"></i> Expense
+            </button>
+            <button id="tabLoanBtn" onclick="switchFormTab('loan')" class="flex-1 py-2 px-1 rounded-xl font-bold text-xs flex items-center justify-center gap-1 text-stone-500 dark:text-slate-400 hover:bg-stone-200 dark:hover:bg-slate-800">
+              <i data-lucide="landmark" class="w-3.5 h-3.5"></i> Pay EMI
+            </button>
+          </div>
+
+          <!-- Income Form -->
+          <form id="incomeForm" onsubmit="handleIncomeSubmit(event)" class="p-3.5 sm:p-4 space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Date *</label>
+                <input type="date" id="incomeDate" required class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Source *</label>
+                <select id="incomeSource" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                  <option value="Salary">Salary</option>
+                  <option value="Freelance">Freelance</option>
+                  <option value="Business Profit">Business</option>
+                  <option value="Investments">Investments</option>
+                  <option value="Other Inflow">Other Income</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Amount (<span class="currency-tag">Rs</span>) *</label>
+              <input type="number" step="0.01" min="0.01" id="incomeAmount" required placeholder="e.g. 120000" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500">
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Notes</label>
+              <input type="text" id="incomeNotes" placeholder="Monthly payroll" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500">
+            </div>
+
+            <button type="submit" id="incomeSubmitBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white font-bold py-2.5 rounded-xl shadow transition flex items-center justify-center gap-1.5 text-xs">
+              <i data-lucide="cloud-upload" class="w-4 h-4"></i> Save Income
+            </button>
+          </form>
+
+          <!-- Expense Form -->
+          <form id="expenseForm" onsubmit="handleExpenseSubmit(event)" class="p-3.5 sm:p-4 space-y-3 hidden">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Date *</label>
+                <input type="date" id="expenseDate" required class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Category *</label>
+                <select id="expenseCategory" required class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500">
+                  <option value="Groceries & Food">Groceries & Food</option>
+                  <option value="Electricity & Utilities">Electricity & Utilities</option>
+                  <option value="Rent & Housing">Rent & Housing</option>
+                  <option value="Fuel & Transport">Fuel & Transport</option>
+                  <option value="Mobile & Internet">Mobile & Internet</option>
+                  <option value="Medical & Health">Medical & Health</option>
+                  <option value="Personal & Leisure">Personal & Leisure</option>
+                  <option value="Other Expenses">Other Misc Bills</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Amount (<span class="currency-tag">Rs</span>) *</label>
+              <input type="number" step="0.01" min="0.01" id="expenseAmount" required placeholder="e.g. 4500" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500">
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Details *</label>
+              <input type="text" id="expenseDescription" placeholder="Supermarket shopping" required class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500">
+            </div>
+
+            <button type="submit" id="expenseSubmitBtn" class="w-full bg-amber-600 hover:bg-amber-500 active:scale-[0.98] text-white font-bold py-2.5 rounded-xl shadow transition flex items-center justify-center gap-1.5 text-xs">
+              <i data-lucide="cloud-upload" class="w-4 h-4"></i> Save Expense
+            </button>
+          </form>
+
+          <!-- Loan EMI Payment Form -->
+          <form id="loanForm" onsubmit="handleLoanPaymentSubmit(event)" class="p-3.5 sm:p-4 space-y-3 hidden">
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Select Tracked Loan *</label>
+              <select id="loanSelectDropdown" onchange="autoFillLoanDetails()" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-rose-500 font-semibold text-xs">
+              </select>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2.5">
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Date *</label>
+                <input type="date" id="loanDate" required class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-rose-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Installment Count</label>
+                <input type="number" id="loanMonthsCount" value="1" min="1" max="12" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-rose-500">
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">EMI Paid (<span class="currency-tag">Rs</span>) *</label>
+              <input type="number" step="0.01" min="0.01" id="loanAmount" required placeholder="e.g. 25000" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-rose-500">
+            </div>
+
+            <div>
+              <label class="block text-xs font-semibold text-stone-600 dark:text-slate-400 mb-1">Receipt / Ref</label>
+              <input type="text" id="loanNotes" placeholder="Bank ref #8492" class="w-full py-2 px-3 rounded-xl border border-stone-300 dark:border-slate-700 bg-stone-50 dark:bg-slate-950 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-rose-500">
+            </div>
+
+            <button type="submit" id="loanSubmitBtn" class="w-full bg-rose-600 hover:bg-rose-500 active:scale-[0.98] text-white font-bold py-2.5 rounded-xl shadow transition flex items-center justify-center gap-1.5 text-xs">
+              <i data-lucide="cloud-upload" class="w-4 h-4"></i> Record EMI & Reduce Debt
+            </button>
+          </form>
+        </div>
+
+        <!-- Interest Method Simulator -->
+        <div class="bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 shadow-sm border border-stone-200 dark:border-slate-800 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <h3 class="font-bold text-stone-800 dark:text-slate-200 text-xs flex items-center gap-1.5 uppercase tracking-wide">
+              <i data-lucide="calculator" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i> Loan Calculator
+            </h3>
+            <span class="text-[10px] bg-stone-100 dark:bg-slate-800 text-stone-600 dark:text-slate-400 px-2 py-0.5 rounded font-mono">Reducing / 0%</span>
+          </div>
+
+          <div class="space-y-2 text-xs">
+            <div>
+              <label class="text-stone-600 dark:text-slate-400 font-medium">Preset</label>
+              <select id="calcPresetSelector" onchange="applyCalcPreset()" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg p-2 text-stone-900 dark:text-slate-200 mt-1 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold">
+                <option value="reducing_custom">Reducing Balance (Bank Loan ~14%)</option>
+                <option value="fixed_custom">Fixed / Flat Rate (Leasing ~12%)</option>
+                <option value="zero_interest">No Interest (0% Hand Loan)</option>
+                <option value="sl_cc_standard">Sri Lankan CC (28% p.a.)</option>
+                <option value="sl_cc_high">Sri Lankan CC (30% p.a.)</option>
+                <option value="sl_cc_max">Sri Lankan CC (36% p.a.)</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="text-stone-600 dark:text-slate-400 font-medium">Principal (<span class="currency-tag">Rs</span>)</label>
+              <input type="number" id="calcPrincipal" value="300000" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg p-2 text-stone-900 dark:text-slate-200 mt-1 focus:outline-none">
+            </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-stone-600 dark:text-slate-400 font-medium">Rate (%)</label>
+                <input type="number" id="calcRate" value="14" step="0.1" min="0" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg p-2 text-stone-900 dark:text-slate-200 mt-1 focus:outline-none">
+              </div>
+              <div>
+                <label class="text-stone-600 dark:text-slate-400 font-medium">Months</label>
+                <input type="number" id="calcTenure" value="24" min="1" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-lg p-2 text-stone-900 dark:text-slate-200 mt-1 focus:outline-none">
+              </div>
+            </div>
+
+            <div class="pt-2 border-t border-stone-200 dark:border-slate-800 space-y-1">
+              <div class="flex justify-between items-center text-xs">
+                <span class="text-stone-500 dark:text-slate-400">Monthly EMI:</span>
+                <span id="calcResultEmi" class="font-bold text-amber-600 dark:text-amber-400 text-sm">Rs 0.00</span>
+              </div>
+              <div class="flex justify-between items-center text-[11px]">
+                <span class="text-stone-500 dark:text-slate-400">Total Interest:</span>
+                <span id="calcResultTotalInterest" class="font-semibold text-rose-500 dark:text-rose-400">Rs 0.00</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Fixed Height with Internal Scroll -->
+      <div class="lg:col-span-7 space-y-4">
+        <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-stone-200 dark:border-slate-800 flex flex-col h-[520px] sm:h-[600px] overflow-hidden">
+          
+          <!-- Sticky Search & Filter Header -->
+          <div class="p-3 sm:p-4 border-b border-stone-200 dark:border-slate-800 flex flex-col gap-2.5 bg-stone-50/70 dark:bg-slate-950/40 rounded-t-2xl shrink-0">
+            <div class="flex items-center justify-between">
+              <h2 class="font-bold text-stone-900 dark:text-slate-200 text-xs sm:text-base flex items-center gap-1.5">
+                <i data-lucide="book-open" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i> Financial Ledger
+              </h2>
+              <span id="recordCountBadge" class="bg-stone-200 dark:bg-slate-800 text-stone-700 dark:text-slate-300 text-[11px] px-2 py-0.5 rounded-full font-bold">0</span>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <div class="relative flex-1">
+                <i data-lucide="search" class="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2"></i>
+                <input type="text" id="searchRecordsInput" oninput="renderRecords()" placeholder="Search description, bill..." class="pl-8 pr-2.5 py-1.5 text-xs rounded-xl bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 text-stone-900 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 w-full">
+              </div>
+
+              <select id="typeFilterSelect" onchange="renderRecords()" class="text-xs bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl px-2 py-1.5 focus:outline-none text-stone-800 dark:text-slate-200 font-semibold shrink-0">
+                <option value="ALL">All</option>
+                <option value="INCOME">Income</option>
+                <option value="EXPENSE">Expense</option>
+                <option value="LOAN">Loans</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Internal Scroll Area -->
+          <div class="flex-1 overflow-y-auto custom-scrollbar relative">
+            <div id="mobileRecordList" class="block sm:hidden divide-y divide-stone-100 dark:divide-slate-800/80 p-2"></div>
+
+            <div class="hidden sm:block overflow-x-auto">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-stone-100/90 dark:bg-slate-950/80 text-stone-600 dark:text-slate-400 uppercase text-[10px] font-semibold border-b border-stone-200 dark:border-slate-800 sticky top-0 z-10 backdrop-blur-sm">
+                  <tr>
+                    <th class="py-2.5 px-3">Date</th>
+                    <th class="py-2.5 px-2">Type</th>
+                    <th class="py-2.5 px-3">Category & Details</th>
+                    <th class="py-2.5 px-3 text-right">Amount</th>
+                    <th class="py-2.5 px-2 text-center no-print">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="recordsTableBody" class="divide-y divide-stone-100 dark:divide-slate-800/80 text-stone-700 dark:text-slate-300"></tbody>
+              </table>
+            </div>
+
+            <div id="emptyState" class="hidden flex flex-col items-center justify-center p-8 text-center h-full">
+              <div class="p-2.5 bg-stone-100 dark:bg-slate-950 text-stone-400 dark:text-slate-500 rounded-2xl mb-2">
+                <i data-lucide="clipboard-list" class="w-7 h-7"></i>
+              </div>
+              <h4 class="font-bold text-stone-700 dark:text-slate-300 text-xs sm:text-sm">No records found</h4>
+              <p class="text-[11px] text-stone-400 dark:text-slate-500 mt-0.5">Add entries to sync with cloud.</p>
+            </div>
+          </div>
+
+          <div class="p-3 bg-stone-50 dark:bg-slate-950/40 border-t border-stone-200 dark:border-slate-800 rounded-b-2xl flex flex-col sm:flex-row justify-between items-center text-xs text-stone-600 dark:text-slate-400 gap-1.5 shrink-0">
+            <span class="font-medium text-[11px]" id="filteredStatsSummary">0 records</span>
+            <div class="flex items-center gap-2 sm:gap-3 text-[11px] sm:text-xs">
+              <span>In: <b class="text-emerald-600 dark:text-emerald-400" id="footerTotalIncome">Rs 0</b></span>
+              <span>Out: <b class="text-rose-600 dark:text-rose-400" id="footerTotalOutflow">Rs 0</b></span>
+              <span>Net: <b class="text-indigo-600 dark:text-indigo-300" id="footerTotalBalance">Rs 0</b></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ADD / EDIT LOAN MODAL -->
+  <div id="newLoanModal" class="fixed inset-0 bg-stone-900/60 dark:bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 hidden no-print">
+    <div class="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl max-w-md w-full p-4 sm:p-6 border border-stone-200 dark:border-slate-800 relative">
+      <div class="flex justify-between items-center mb-3 border-b border-stone-200 dark:border-slate-800 pb-2.5">
+        <h3 id="loanModalTitle" class="font-bold text-stone-900 dark:text-white text-sm sm:text-base flex items-center gap-2">
+          <i data-lucide="landmark" class="w-4 h-4 text-indigo-500 dark:text-indigo-400"></i> Add Loan / Card
+        </h3>
+        <button onclick="closeNewLoanModal()" class="text-stone-400 dark:text-slate-400 hover:text-stone-700 dark:hover:text-white p-1">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <input type="hidden" id="editingLoanId" value="">
+
+      <form id="createLoanForm" onsubmit="handleCreateOrUpdateLoanSubmit(event)" class="space-y-3 text-xs">
+        <div>
+          <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Loan Title / Lender Name *</label>
+          <input type="text" id="nlTitle" required placeholder="BOC Personal Loan, CC, Hand Loan" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2.5 text-stone-900 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500">
+        </div>
+
+        <div>
+          <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Preset Category</label>
+          <select id="nlPresetCategory" onchange="handleModalPresetChange()" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2.5 text-stone-900 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold">
+            <option value="zero">No Interest (0% - Hand Loan / Friends)</option>
+            <option value="bank_reducing">Standard Bank Loan (Reducing ~14%)</option>
+            <option value="fixed_lease">Fixed / Flat Rate (Leasing ~12%)</option>
+            <option value="sl_cc_28">Credit Card (28% p.a.)</option>
+            <option value="sl_cc_30">Credit Card (30% p.a.)</option>
+            <option value="sl_cc_36">Credit Card (36% p.a.)</option>
+            <option value="custom">Custom Rate</option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Principal (<span class="currency-tag">Rs</span>) *</label>
+            <input type="number" id="nlPrincipal" required min="1" step="0.01" placeholder="300000" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Rate (%) *</label>
+            <input type="number" id="nlRate" required min="0" step="0.1" value="0" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Tenure (Months) *</label>
+            <input type="number" id="nlTenure" required min="1" value="12" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Calculation</label>
+            <select id="nlMethod" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+              <option value="zero">Zero Interest (0%)</option>
+              <option value="reducing">Reducing Balance</option>
+              <option value="flat">Fixed / Flat Rate</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-2.5">
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Paid Months</label>
+            <input type="number" id="nlPaidMonths" value="0" min="0" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-stone-600 dark:text-slate-400 font-semibold mb-1">Start Date</label>
+            <input type="date" id="nlStartDate" class="w-full bg-stone-50 dark:bg-slate-950 border border-stone-300 dark:border-slate-700 rounded-xl p-2 text-stone-900 dark:text-slate-200 focus:outline-none">
+          </div>
+        </div>
+
+        <button type="submit" id="createLoanBtn" class="w-full mt-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2.5 rounded-xl shadow transition text-xs flex items-center justify-center gap-1.5">
+          <i data-lucide="cloud-upload" class="w-4 h-4"></i> <span id="createLoanBtnText">Save to Cloud</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Print Statement Modal -->
+  <div id="printModal" class="fixed inset-0 bg-stone-900/60 dark:bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-6 hidden no-print">
+    <div class="bg-white text-stone-900 rounded-3xl shadow-2xl max-w-5xl w-full max-h-[96vh] flex flex-col border border-stone-200 overflow-hidden">
+      
+      <div class="p-3 sm:p-4 border-b border-stone-200 bg-stone-50 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 class="text-sm sm:text-base font-bold text-stone-900 flex items-center gap-1.5">
+            <i data-lucide="printer" class="w-4 h-4 text-indigo-700"></i> Export Statement
+          </h2>
+        </div>
+
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <div class="flex items-center bg-stone-200 rounded-xl p-0.5 text-xs font-semibold">
+            <button id="scopeMonthBtn" onclick="setExportScope('month')" class="px-2 py-1 rounded-lg bg-white shadow-sm text-stone-900 text-xs">Month</button>
+            <button id="scopeAllBtn" onclick="setExportScope('all')" class="px-2 py-1 rounded-lg text-stone-600 text-xs">All</button>
+          </div>
+
+          <div id="exportMonthContainer" class="flex items-center">
+            <select id="exportMonthDropdown" onchange="window.renderPrintPreview()" class="border border-stone-300 rounded-xl px-2 py-1 text-xs font-semibold text-stone-800 bg-white">
+            </select>
+          </div>
+
+          <button onclick="downloadActiveCSV()" class="bg-stone-200 hover:bg-stone-300 text-stone-800 text-xs font-bold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1">
+            <i data-lucide="download" class="w-3.5 h-3.5"></i> CSV
+          </button>
+
+          <button id="downloadPdfBtn" onclick="downloadActivePDF()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1 shadow">
+            <i data-lucide="file-down" class="w-3.5 h-3.5"></i> PDF
+          </button>
+
+          <button onclick="triggerCompletePrint()" class="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-2.5 py-1.5 rounded-xl transition flex items-center gap-1 shadow">
+            <i data-lucide="printer" class="w-3.5 h-3.5"></i>
+          </button>
+
+          <button onclick="closePrintModal()" class="text-stone-400 hover:text-stone-700 p-1">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="p-3 sm:p-6 overflow-y-auto flex-grow custom-scrollbar bg-stone-100 flex justify-center">
+        <div id="modalPreviewCanvas" class="bg-white p-4 sm:p-6 shadow border border-stone-200 text-xs w-full max-w-[800px] min-h-[450px]">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sign In / Register Modal -->
+  <div id="authModal" class="fixed inset-0 bg-stone-900/60 dark:bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 no-print">
+    <div class="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl max-w-sm sm:max-w-md w-full p-5 sm:p-7 border border-stone-200 dark:border-slate-800 relative">
+      <div class="text-center mb-5">
+        <div class="inline-flex bg-indigo-600/10 dark:bg-indigo-600/20 text-indigo-600 dark:text-indigo-400 p-2.5 rounded-2xl mb-1.5">
+          <i data-lucide="wallet" class="w-7 h-7 stroke-[2.5]"></i>
+        </div>
+        <h2 id="authTitle" class="text-xl sm:text-2xl font-bold text-stone-900 dark:text-white">Sign In to Cloud Budget</h2>
+        <p id="authSubtitle" class="text-[11px] text-stone-500 dark:text-slate-400 mt-0.5">Manage personal finances & loans securely</p>
+      </div>
+
+      <div class="flex bg-stone-100 dark:bg-slate-800 p-1 rounded-xl mb-4 text-xs font-semibold">
+        <button id="toggleLoginBtn" onclick="setAuthMode('login')" class="flex-1 py-1.5 rounded-lg bg-indigo-600 text-white shadow-sm">Sign In</button>
+        <button id="toggleRegisterBtn" onclick="setAuthMode('register')" class="flex-1 py-1.5 rounded-lg text-stone-500 dark:text-slate-400 hover:text-stone-900 dark:hover:text-white">Register</button>
+      </div>
+
+      <form id="authForm" onsubmit="handleAuthSubmit(event)" class="space-y-3.5">
+        <div>
+          <label class="block text-xs font-semibold text-stone-700 dark:text-slate-300 mb-1">Email Address</label>
+          <div class="relative">
+            <i data-lucide="mail" class="w-4 h-4 text-stone-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input type="email" id="authEmail" required placeholder="user@gmail.com" class="w-full py-2.5 pl-9 pr-3 rounded-xl bg-stone-50 dark:bg-slate-800 border border-stone-300 dark:border-slate-700 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500">
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-stone-700 dark:text-slate-300 mb-1">Password</label>
+          <div class="relative">
+            <i data-lucide="lock" class="w-4 h-4 text-stone-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
+            <input type="password" id="authPassword" required minlength="6" placeholder="••••••••" class="w-full py-2.5 pl-9 pr-3 rounded-xl bg-stone-50 dark:bg-slate-800 border border-stone-300 dark:border-slate-700 text-stone-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500">
+          </div>
+        </div>
+
+        <p id="authError" class="text-xs text-rose-500 dark:text-rose-400 font-medium hidden"></p>
+
+        <button type="submit" id="authSubmitBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl shadow transition text-sm flex items-center justify-center gap-2">
+          <span>Sign In</span>
+          <i data-lucide="arrow-right" class="w-4 h-4"></i>
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Delete Modal -->
+  <div id="confirmModal" class="fixed inset-0 bg-stone-900/50 dark:bg-slate-950/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden no-print">
+    <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-xl max-w-xs sm:max-w-sm w-full p-4 space-y-3 border border-stone-200 dark:border-slate-800">
+      <div class="flex items-center gap-3">
+        <div class="p-2 rounded-xl bg-rose-500/10 text-rose-600 dark:text-rose-400 shrink-0">
+          <i data-lucide="alert-triangle" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <h3 id="modalTitle" class="font-bold text-stone-900 dark:text-white text-sm sm:text-base">Confirm Delete</h3>
+          <p id="modalDesc" class="text-[11px] text-stone-500 dark:text-slate-400 mt-0.5">Are you sure you want to proceed?</p>
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-1">
+        <button id="modalCancelBtn" class="px-3.5 py-1.5 text-xs font-semibold rounded-xl text-stone-600 dark:text-slate-400 hover:bg-stone-100 dark:hover:bg-slate-800">Cancel</button>
+        <button id="modalConfirmBtn" class="px-3.5 py-1.5 text-xs font-semibold rounded-xl bg-rose-600 text-white">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const CURRENCY_KEY = 'personal_finance_curr_v6';
+    const THEME_KEY = 'personal_finance_theme_v1';
+
+    // Base currency for storage is always LKR (Rs)
+    // Conversion rates relative to 1 LKR:
+    // 1 USD ~ 332.36 LKR -> 1 LKR = (1 / 332.36) USD
+    // 1 EUR ~ 372.81 LKR -> 1 LKR = (1 / 372.81) EUR
+    // 1 GBP ~ 446.27 LKR -> 1 LKR = (1 / 446.27) GBP
+    const RATES_FROM_LKR = {
+      'Rs': 1,
+      '$': 1 / 332.36,
+      '€': 1 / 372.81,
+      '£': 1 / 446.27
+    };
+
+    window.financeRecords = [];
+    window.activeLoans = [];
+    let currentCurrency = 'Rs';
+    let currentFilter = 'all';
+    let customStartDate = null;
+    let customEndDate = null;
+    let authMode = 'login';
+    let exportScope = 'month';
+
+    function applySavedTheme() {
+      const savedTheme = localStorage.getItem(THEME_KEY) || 'dark';
+      const htmlEl = document.documentElement;
+      const themeIcon = document.getElementById('themeIcon');
+
+      if (savedTheme === 'light') {
+        htmlEl.classList.remove('dark');
+        htmlEl.style.setProperty('--app-font', "'Outfit', sans-serif");
+        if (themeIcon) themeIcon.setAttribute('data-lucide', 'moon');
+      } else {
+        htmlEl.classList.add('dark');
+        htmlEl.style.setProperty('--app-font', "'Plus Jakarta Sans', sans-serif");
+        if (themeIcon) themeIcon.setAttribute('data-lucide', 'sun');
+      }
+      lucide.createIcons();
+    }
+
+    function toggleTheme() {
+      const htmlEl = document.documentElement;
+      const isDark = htmlEl.classList.contains('dark');
+      if (isDark) {
+        localStorage.setItem(THEME_KEY, 'light');
+      } else {
+        localStorage.setItem(THEME_KEY, 'dark');
+      }
+      applySavedTheme();
+      showToast(`Switched to ${isDark ? 'Light (Outfit font)' : 'Dark (Plus Jakarta Sans font)'} Mode`);
+    }
+
+    function convertFromBaseLkr(amountInLkr) {
+      const rate = RATES_FROM_LKR[currentCurrency] || 1;
+      return (Number(amountInLkr) || 0) * rate;
+    }
+
+    function convertToBaseLkr(amountInSelectedCurrency) {
+      const rate = RATES_FROM_LKR[currentCurrency] || 1;
+      return (Number(amountInSelectedCurrency) || 0) / rate;
+    }
+
+    function formatMoney(amountInLkr) {
+      if (isNaN(amountInLkr)) amountInLkr = 0;
+      const converted = convertFromBaseLkr(amountInLkr);
+      return `${currentCurrency} ${Number(converted).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    function updateCurrencyTags() {
+      document.querySelectorAll('.currency-tag').forEach(el => {
+        el.textContent = currentCurrency;
+      });
+    }
+
+    function extractMonthKey(dateVal) {
+      if (!dateVal) return '';
+      const str = String(dateVal).trim();
+      const match = str.match(/^(\d{4})[-/](\d{1,2})/);
+      return match ? `${match[1]}-${match[2].padStart(2, '0')}` : '';
+    }
+
+    function computeLoanMath(principal, annualRate, tenureMonths, method) {
+      const p = parseFloat(principal) || 0;
+      const r = parseFloat(annualRate) || 0;
+      const n = parseFloat(tenureMonths) || 1;
+      if (p <= 0 || n <= 0) return { emi: 0, totalPayable: 0, totalInterest: 0 };
+
+      let emi = 0, totalPayable = 0, totalInterest = 0;
+
+      if (method === 'zero' || r === 0) {
+        emi = p / n;
+        totalPayable = p;
+        totalInterest = 0;
+      } else if (method === 'reducing') {
+        const monthlyRate = r / 12 / 100;
+        emi = (p * monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1);
+        totalPayable = emi * n;
+        totalInterest = totalPayable - p;
+      } else {
+        const years = n / 12;
+        totalInterest = (p * r * years) / 100;
+        totalPayable = p + totalInterest;
+        emi = totalPayable / n;
+      }
+
+      return { emi, totalPayable, totalInterest };
+    }
+
+    function applyCalcPreset() {
+      const preset = document.getElementById('calcPresetSelector').value;
+      const rateInput = document.getElementById('calcRate');
+
+      if (preset === 'zero_interest') rateInput.value = 0;
+      else if (preset === 'reducing_custom') rateInput.value = 14;
+      else if (preset === 'fixed_custom') rateInput.value = 12;
+      else if (preset === 'sl_cc_standard') rateInput.value = 28.0;
+      else if (preset === 'sl_cc_high') rateInput.value = 30.0;
+      else if (preset === 'sl_cc_max') rateInput.value = 36.0;
+      calculateEMI();
+    }
+
+    function calculateEMI() {
+      const preset = document.getElementById('calcPresetSelector').value;
+      let method = 'reducing';
+      if (preset === 'zero_interest') method = 'zero';
+      else if (preset === 'fixed_custom') method = 'flat';
+
+      const pInput = parseFloat(document.getElementById('calcPrincipal').value) || 0;
+      const r = document.getElementById('calcRate').value;
+      const n = document.getElementById('calcTenure').value;
+
+      // Input treated as current selected currency, calculate math directly
+      const res = computeLoanMath(pInput, r, n, method);
+      document.getElementById('calcResultEmi').textContent = `${currentCurrency} ${Number(res.emi).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      document.getElementById('calcResultTotalInterest').textContent = `${currentCurrency} ${Number(res.totalInterest).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    ['calcPrincipal', 'calcRate', 'calcTenure'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('input', calculateEMI);
+    });
+
+    function handleModalPresetChange() {
+      const preset = document.getElementById('nlPresetCategory').value;
+      const rateInput = document.getElementById('nlRate');
+      const methodSelect = document.getElementById('nlMethod');
+
+      if (preset === 'zero') {
+        rateInput.value = 0;
+        methodSelect.value = 'zero';
+      } else if (preset === 'bank_reducing') {
+        rateInput.value = 14;
+        methodSelect.value = 'reducing';
+      } else if (preset === 'fixed_lease') {
+        rateInput.value = 12;
+        methodSelect.value = 'flat';
+      } else if (preset === 'sl_cc_28') {
+        rateInput.value = 28.0;
+        methodSelect.value = 'reducing';
+      } else if (preset === 'sl_cc_30') {
+        rateInput.value = 30.0;
+        methodSelect.value = 'reducing';
+      } else if (preset === 'sl_cc_36') {
+        rateInput.value = 36.0;
+        methodSelect.value = 'reducing';
+      }
+    }
+
+    window.renderLoansTracker = function() {
+      const container = document.getElementById('loansCardsContainer');
+      const loans = window.activeLoans || [];
+      let totalRemainingDebtSum = 0;
+
+      if (loans.length === 0) {
+        container.innerHTML = `
+          <div class="col-span-full p-4 rounded-2xl bg-stone-50 dark:bg-slate-950/40 border border-stone-200 dark:border-slate-800 text-center text-stone-500 dark:text-slate-500 text-xs">
+            No active loans or cards added yet. Click <b>"Add Loan / CC"</b> to track.
+          </div>
+        `;
+        document.getElementById('statTotalRemainingDebt').textContent = formatMoney(0);
+        document.getElementById('statActiveLoansCount').textContent = '0 active';
+        return;
+      }
+
+      let html = '';
+      loans.forEach(loan => {
+        const principal = loan.principal || 0;
+        const rate = loan.interestRate || 0;
+        const totalMonths = loan.tenureMonths || 1;
+        const method = loan.calculationMethod || (rate === 0 ? 'zero' : 'reducing');
+        
+        const math = computeLoanMath(principal, rate, totalMonths, method);
+        const monthlyEmi = math.emi;
+        const totalPayableExpected = math.totalPayable;
+
+        const paidMonths = loan.paidMonths || 0;
+        const paidAmount = loan.paidAmount !== undefined ? loan.paidAmount : (paidMonths * monthlyEmi);
+
+        const remainingMonths = Math.max(0, totalMonths - paidMonths);
+        const remainingBalance = Math.max(0, totalPayableExpected - paidAmount);
+        totalRemainingDebtSum += remainingBalance;
+
+        const progressPct = Math.min(100, totalPayableExpected > 0 ? ((paidAmount / totalPayableExpected) * 100).toFixed(1) : 0);
+        const isCompleted = remainingMonths === 0 || remainingBalance <= 0;
+
+        let methodBadge = 'Reducing';
+        if (method === 'zero' || rate === 0) methodBadge = '0% Free';
+        else if (method === 'flat') methodBadge = 'Fixed Flat';
+
+        html += `
+          <div class="bg-stone-50 dark:bg-slate-950/60 border ${isCompleted ? 'border-emerald-500/30' : 'border-stone-200 dark:border-slate-800'} rounded-2xl p-3.5 flex flex-col justify-between space-y-2.5">
+            <div>
+              <div class="flex justify-between items-start gap-1">
+                <div class="min-w-0">
+                  <h3 class="font-bold text-stone-900 dark:text-white text-xs sm:text-sm truncate">${escapeHtml(loan.title)}</h3>
+                  <span class="text-[10px] ${rate === 0 ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-stone-500 dark:text-slate-400'}">${methodBadge} · ${rate}%</span>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <span class="px-1.5 py-0.2 rounded text-[9px] font-bold ${isCompleted ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300' : 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20'}">
+                    ${isCompleted ? 'Settled' : 'Active'}
+                  </span>
+                  <button onclick="openEditLoanModal('${loan.id}')" title="Edit" class="p-1 rounded-lg bg-stone-200 dark:bg-slate-800 hover:scale-105 transition">
+                    <i data-lucide="edit-3" class="w-3 h-3 text-indigo-600 dark:text-indigo-400"></i>
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-stone-200 dark:border-slate-800/80 text-xs">
+                <div>
+                  <div class="text-[9px] uppercase tracking-wider text-stone-400 dark:text-slate-500">Paid</div>
+                  <div class="font-bold text-emerald-600 dark:text-emerald-400 text-xs mt-0.5 truncate">${formatMoney(paidAmount)}</div>
+                  <div class="text-[9px] text-stone-500 dark:text-slate-400">${paidMonths}/${totalMonths} mo</div>
+                </div>
+
+                <div>
+                  <div class="text-[9px] uppercase tracking-wider text-stone-400 dark:text-slate-500">Left</div>
+                  <div class="font-bold text-rose-600 dark:text-rose-400 text-xs mt-0.5 truncate">${formatMoney(remainingBalance)}</div>
+                  <div class="text-[9px] font-semibold ${remainingMonths <= 3 ? 'text-amber-500' : 'text-stone-500 dark:text-slate-300'}">${remainingMonths} mo left</div>
+                </div>
+              </div>
+
+              <div class="mt-2">
+                <div class="flex justify-between text-[9px] text-stone-500 dark:text-slate-400 mb-0.5">
+                  <span>Progress</span>
+                  <span class="font-bold text-stone-700 dark:text-slate-200">${progressPct}%</span>
+                </div>
+                <div class="w-full bg-stone-200 dark:bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                  <div class="bg-gradient-to-r from-indigo-500 to-emerald-400 h-full rounded-full" style="width: ${progressPct}%"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="pt-2 border-t border-stone-200 dark:border-slate-800 flex justify-between items-center text-[10px] text-stone-500 dark:text-slate-400">
+              <span class="truncate">EMI: <b class="text-stone-900 dark:text-white">${formatMoney(monthlyEmi)}/mo</b></span>
+              <div class="flex items-center gap-1 shrink-0">
+                <button onclick="quickPayEmiPrompt('${loan.id}')" class="px-2 py-0.5 rounded-lg bg-indigo-600 text-white text-[10px] font-bold">
+                  Pay 1 EMI
+                </button>
+                <button onclick="deleteLoanPrompt('${loan.id}')" class="text-stone-400 hover:text-rose-600 p-0.5">
+                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+
+      container.innerHTML = html;
+      document.getElementById('statTotalRemainingDebt').textContent = formatMoney(totalRemainingDebtSum);
+      document.getElementById('statActiveLoansCount').textContent = `${loans.length} active`;
+      lucide.createIcons();
+    };
+
+    window.populateLoanDropdown = function() {
+      const dropdown = document.getElementById('loanSelectDropdown');
+      if (!dropdown) return;
+      const loans = window.activeLoans || [];
+
+      if (loans.length === 0) {
+        dropdown.innerHTML = '<option value="">No tracked loans. Add one first!</option>';
+        return;
+      }
+
+      dropdown.innerHTML = loans.map(l => {
+        return `<option value="${l.id}">${escapeHtml(l.title)} (EMI: ${formatMoney(computeLoanMath(l.principal, l.interestRate, l.tenureMonths, l.calculationMethod).emi)})</option>`;
+      }).join('');
+
+      autoFillLoanDetails();
+    };
+
+    function autoFillLoanDetails() {
+      const loanId = document.getElementById('loanSelectDropdown').value;
+      const loan = (window.activeLoans || []).find(l => l.id === loanId);
+      if (loan) {
+        const math = computeLoanMath(loan.principal, loan.interestRate, loan.tenureMonths, loan.calculationMethod);
+        const months = parseInt(document.getElementById('loanMonthsCount').value) || 1;
+        const convertedEmi = convertFromBaseLkr(math.emi * months);
+        document.getElementById('loanAmount').value = convertedEmi.toFixed(2);
+      }
+    }
+
+    document.getElementById('loanMonthsCount').addEventListener('input', autoFillLoanDetails);
+
+    function openNewLoanModal() {
+      document.getElementById('editingLoanId').value = '';
+      document.getElementById('loanModalTitle').innerHTML = '<i data-lucide="landmark" class="w-4 h-4 text-indigo-500"></i> Add Loan / CC';
+      document.getElementById('createLoanBtnText').textContent = 'Save to Cloud';
+      document.getElementById('createLoanForm').reset();
+      document.getElementById('nlStartDate').value = new Date().toISOString().split('T')[0];
+      document.getElementById('newLoanModal').classList.remove('hidden');
+      handleModalPresetChange();
+      lucide.createIcons();
+    }
+
+    window.openEditLoanModal = function(loanId) {
+      const loan = (window.activeLoans || []).find(l => l.id === loanId);
+      if (!loan) return showToast('Loan not found', 'error');
+
+      document.getElementById('editingLoanId').value = loan.id;
+      document.getElementById('loanModalTitle').innerHTML = '<i data-lucide="edit-3" class="w-4 h-4 text-indigo-500"></i> Edit Loan Details';
+      document.getElementById('createLoanBtnText').textContent = 'Update Loan';
+
+      document.getElementById('nlTitle').value = loan.title || '';
+      document.getElementById('nlPrincipal').value = convertFromBaseLkr(loan.principal || 0).toFixed(2);
+      document.getElementById('nlRate').value = loan.interestRate !== undefined ? loan.interestRate : 0;
+      document.getElementById('nlTenure').value = loan.tenureMonths || 12;
+      document.getElementById('nlPaidMonths').value = loan.paidMonths !== undefined ? loan.paidMonths : 0;
+      document.getElementById('nlStartDate').value = loan.startDate || new Date().toISOString().split('T')[0];
+
+      const rate = loan.interestRate;
+      const method = loan.calculationMethod || 'reducing';
+      document.getElementById('nlMethod').value = method;
+
+      const presetSelect = document.getElementById('nlPresetCategory');
+      if (rate === 0 || method === 'zero') presetSelect.value = 'zero';
+      else if (rate === 28.0) presetSelect.value = 'sl_cc_28';
+      else if (rate === 30.0) presetSelect.value = 'sl_cc_30';
+      else if (rate === 36.0) presetSelect.value = 'sl_cc_36';
+      else if (method === 'flat') presetSelect.value = 'fixed_lease';
+      else presetSelect.value = 'bank_reducing';
+
+      document.getElementById('newLoanModal').classList.remove('hidden');
+      lucide.createIcons();
+    };
+
+    function closeNewLoanModal() {
+      document.getElementById('newLoanModal').classList.add('hidden');
+      document.getElementById('editingLoanId').value = '';
+    }
+
+    async function handleCreateOrUpdateLoanSubmit(e) {
+      e.preventDefault();
+      const user = window.fbAuth.currentUser;
+      if (!user) return showToast('Please sign in first', 'error');
+
+      const editId = document.getElementById('editingLoanId').value;
+      const title = (document.getElementById('nlTitle').value || '').trim();
+      const principalInput = parseFloat(document.getElementById('nlPrincipal').value) || 0;
+      const interestRate = parseFloat(document.getElementById('nlRate').value) || 0;
+      const tenureMonths = parseInt(document.getElementById('nlTenure').value) || 1;
+      let calculationMethod = document.getElementById('nlMethod').value || 'reducing';
+      if (interestRate === 0) calculationMethod = 'zero';
+
+      const paidMonths = parseInt(document.getElementById('nlPaidMonths').value) || 0;
+      const startDate = document.getElementById('nlStartDate').value || new Date().toISOString().split('T')[0];
+
+      if (!title || principalInput <= 0 || tenureMonths <= 0) {
+        return showToast('Check Title, Principal & Tenure fields', 'error');
+      }
+
+      // Convert principal entered in current currency back to base LKR for consistent global storage
+      const principalInLkr = convertToBaseLkr(principalInput);
+
+      const btn = document.getElementById('createLoanBtn');
+      btn.disabled = true;
+
+      const math = computeLoanMath(principalInLkr, interestRate, tenureMonths, calculationMethod);
+      const computedPaidAmount = paidMonths * (math.emi || 0);
+
+      const loanPayload = {
+        title: String(title),
+        principal: Number(principalInLkr),
+        interestRate: Number(interestRate),
+        tenureMonths: Number(tenureMonths),
+        calculationMethod: String(calculationMethod),
+        paidMonths: Number(paidMonths),
+        paidAmount: Number(computedPaidAmount),
+        startDate: String(startDate)
+      };
+
+      try {
+        if (editId) {
+          const loanDocRef = window.fbMethods.doc(window.fbDb, 'users', user.uid, 'active_loans', editId);
+          await window.fbMethods.updateDoc(loanDocRef, {
+            ...loanPayload,
+            updatedAt: new Date().toISOString()
+          });
+          showToast('Loan details updated!');
+        } else {
+          const ref = window.fbMethods.collection(window.fbDb, 'users', user.uid, 'active_loans');
+          await window.fbMethods.addDoc(ref, {
+            ...loanPayload,
+            createdAt: new Date().toISOString()
+          });
+          showToast('Loan added to tracking portfolio!');
+        }
+
+        closeNewLoanModal();
+        document.getElementById('createLoanForm').reset();
+      } catch (err) {
+        showToast('Error saving loan: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function handleLoanPaymentSubmit(e) {
+      e.preventDefault();
+      const user = window.fbAuth.currentUser;
+      if (!user) return showToast('Please sign in first', 'error');
+
+      const loanId = document.getElementById('loanSelectDropdown').value;
+      const date = document.getElementById('loanDate').value;
+      const monthsPaid = parseInt(document.getElementById('loanMonthsCount').value) || 1;
+      const amountInput = parseFloat(document.getElementById('loanAmount').value);
+      const notes = document.getElementById('loanNotes').value.trim();
+
+      if (!date || isNaN(amountInput) || amountInput <= 0) return showToast('Check date & amount', 'error');
+
+      const amountInLkr = convertToBaseLkr(amountInput);
+
+      const loan = (window.activeLoans || []).find(l => l.id === loanId);
+      const loanTitle = loan ? loan.title : 'Loan EMI';
+
+      const record = {
+        type: 'LOAN',
+        date,
+        category: loanTitle,
+        amount: amountInLkr,
+        loanId: loanId || null,
+        notes: `EMI (${monthsPaid} mo) ${notes ? '· ' + notes : ''}`,
+        createdAt: new Date().toISOString()
+      };
+
+      try {
+        const ref = window.fbMethods.collection(window.fbDb, 'users', user.uid, 'personal_finance_records');
+        await window.fbMethods.addDoc(ref, record);
+
+        if (loan && loanId) {
+          const loanDocRef = window.fbMethods.doc(window.fbDb, 'users', user.uid, 'active_loans', loanId);
+          const newPaidMonths = (loan.paidMonths || 0) + monthsPaid;
+          const newPaidAmount = (loan.paidAmount || 0) + amountInLkr;
+
+          await window.fbMethods.updateDoc(loanDocRef, {
+            paidMonths: newPaidMonths,
+            paidAmount: newPaidAmount,
+            lastPaymentDate: date
+          });
+        }
+
+        document.getElementById('loanAmount').value = '';
+        document.getElementById('loanNotes').value = '';
+        showToast(`EMI Recorded: -${formatMoney(amountInLkr)}`);
+      } catch (err) {
+        showToast('Failed to record EMI: ' + err.message, 'error');
+      }
+    }
+
+    function quickPayEmiPrompt(loanId) {
+      const loan = (window.activeLoans || []).find(l => l.id === loanId);
+      if (!loan) return;
+      const math = computeLoanMath(loan.principal, loan.interestRate, loan.tenureMonths, loan.calculationMethod);
+
+      openModal({
+        title: `Pay 1 Month EMI for ${loan.title}?`,
+        desc: `This will log an outflow of ${formatMoney(math.emi)} and reduce remaining tenure.`,
+        onConfirm: async () => {
+          const user = window.fbAuth.currentUser;
+          if (!user) return;
+          const todayStr = new Date().toISOString().split('T')[0];
+
+          try {
+            await window.fbMethods.addDoc(window.fbMethods.collection(window.fbDb, 'users', user.uid, 'personal_finance_records'), {
+              type: 'LOAN',
+              date: todayStr,
+              category: loan.title,
+              amount: math.emi,
+              loanId: loan.id,
+              notes: 'Quick EMI Payment',
+              createdAt: new Date().toISOString()
+            });
+
+            await window.fbMethods.updateDoc(window.fbMethods.doc(window.fbDb, 'users', user.uid, 'active_loans', loan.id), {
+              paidMonths: (loan.paidMonths || 0) + 1,
+              paidAmount: (loan.paidAmount || 0) + math.emi,
+              lastPaymentDate: todayStr
+            });
+
+            showToast(`Recorded EMI: ${formatMoney(math.emi)}`);
+          } catch(e) {
+            showToast('Error recording payment', 'error');
+          }
+        }
+      });
+    }
+
+    function deleteLoanPrompt(loanId) {
+      const user = window.fbAuth.currentUser;
+      if (!user) return;
+
+      openModal({
+        title: 'Delete Tracked Loan?',
+        desc: 'This loan profile will be removed from your dashboard.',
+        onConfirm: async () => {
+          try {
+            const docRef = window.fbMethods.doc(window.fbDb, 'users', user.uid, 'active_loans', loanId);
+            await window.fbMethods.deleteDoc(docRef);
+            showToast('Loan removed from tracker');
+          } catch (err) {
+            showToast('Failed to delete loan', 'error');
+          }
+        }
+      });
+    }
+
+    window.populateAvailableMonths = function() {
+      const dropdown = document.getElementById('exportMonthDropdown');
+      if (!dropdown) return;
+
+      const records = window.financeRecords || [];
+      const monthSet = new Set();
+      records.forEach(r => {
+        const k = extractMonthKey(r.date || r.createdAt);
+        if (k) monthSet.add(k);
+      });
+
+      const today = new Date().toISOString().split('T')[0];
+      monthSet.add(today.substring(0, 7));
+
+      const sorted = Array.from(monthSet).sort().reverse();
+      dropdown.innerHTML = sorted.map(m => {
+        const [yr, mo] = m.split('-');
+        const d = new Date(parseInt(yr), parseInt(mo) - 1, 1);
+        const name = d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+        return `<option value="${m}">${name}</option>`;
+      }).join('');
+    };
+
+    window.addEventListener('DOMContentLoaded', () => {
+      applySavedTheme();
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      document.getElementById('incomeDate').value = todayStr;
+      document.getElementById('expenseDate').value = todayStr;
+      document.getElementById('loanDate').value = todayStr;
+
+      const savedCurrency = localStorage.getItem(CURRENCY_KEY);
+      if (savedCurrency) {
+        currentCurrency = savedCurrency;
+        document.getElementById('currencySelect').value = savedCurrency;
+      }
+
+      updateCurrencyTags();
+
+      document.getElementById('currencySelect').addEventListener('change', (e) => {
+        currentCurrency = e.target.value;
+        localStorage.setItem(CURRENCY_KEY, currentCurrency);
+        updateCurrencyTags();
+        calculateEMI();
+        window.updateDashboard();
+        window.renderLoansTracker();
+        window.populateLoanDropdown();
+        window.renderPrintPreview();
+        showToast('Currency set to ' + currentCurrency + ' (All values converted)');
+      });
+
+      calculateEMI();
+      window.populateAvailableMonths();
+      window.updateDashboard();
+      window.renderLoansTracker();
+      lucide.createIcons();
+    });
+
+    function setAuthMode(mode) {
+      authMode = mode;
+      const title = document.getElementById('authTitle');
+      const sub = document.getElementById('authSubtitle');
+      const btn = document.getElementById('authSubmitBtn');
+      const tabLogin = document.getElementById('toggleLoginBtn');
+      const tabReg = document.getElementById('toggleRegisterBtn');
+
+      if (mode === 'login') {
+        title.textContent = "Sign In to Cloud Budget";
+        sub.textContent = "Access your budget securely";
+        btn.querySelector('span').textContent = "Sign In";
+        tabLogin.className = "flex-1 py-1.5 rounded-lg bg-indigo-600 text-white shadow-sm";
+        tabReg.className = "flex-1 py-1.5 rounded-lg text-stone-500 dark:text-slate-400 hover:text-stone-900 dark:hover:text-white";
+      } else {
+        title.textContent = "Create Cloud Account";
+        sub.textContent = "Start syncing your finances to cloud";
+        btn.querySelector('span').textContent = "Create Account";
+        tabReg.className = "flex-1 py-1.5 rounded-lg bg-indigo-600 text-white shadow-sm";
+        tabLogin.className = "flex-1 py-1.5 rounded-lg text-stone-500 dark:text-slate-400 hover:text-stone-900 dark:hover:text-white";
+      }
+      lucide.createIcons();
+    }
+
+    async function handleAuthSubmit(e) {
+      e.preventDefault();
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+      const errEl = document.getElementById('authError');
+      const btn = document.getElementById('authSubmitBtn');
+
+      errEl.classList.add('hidden');
+      btn.disabled = true;
+
+      try {
+        if (authMode === 'login') {
+          await window.fbMethods.signInWithEmailAndPassword(window.fbAuth, email, password);
+          showToast('Welcome back! Cloud sync active.');
+        } else {
+          await window.fbMethods.createUserWithEmailAndPassword(window.fbAuth, email, password);
+          showToast('Account created! Personal ledger ready.');
+        }
+      } catch (err) {
+        errEl.textContent = err.message.replace('Firebase: ', '');
+        errEl.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function handleLogout() {
+      try {
+        await window.fbMethods.signOut(window.fbAuth);
+        showToast('Logged out successfully.');
+      } catch (err) {
+        showToast('Logout error', 'error');
+      }
+    }
+
+    function switchFormTab(tab) {
+      const tabs = ['income', 'expense', 'loan'];
+      tabs.forEach(t => {
+        const btn = document.getElementById(`tab${capitalize(t)}Btn`);
+        const f = document.getElementById(`${t}Form`);
+        if (t === tab) {
+          btn.className = `flex-1 py-2 px-1 rounded-xl font-bold text-xs flex items-center justify-center gap-1 ${
+            t === 'income' ? 'bg-emerald-600 text-white' : (t === 'expense' ? 'bg-amber-600 text-white' : 'bg-rose-600 text-white')
+          } shadow-sm`;
+          f.classList.remove('hidden');
+        } else {
+          btn.className = "flex-1 py-2 px-1 rounded-xl font-bold text-xs flex items-center justify-center gap-1 text-stone-500 dark:text-slate-400 hover:bg-stone-200 dark:hover:bg-slate-800";
+          f.classList.add('hidden');
+        }
+      });
+      lucide.createIcons();
+    }
+
+    function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+    async function handleIncomeSubmit(e) {
+      e.preventDefault();
+      const user = window.fbAuth.currentUser;
+      if (!user) return showToast('Please sign in first', 'error');
+
+      const date = document.getElementById('incomeDate').value;
+      const source = document.getElementById('incomeSource').value;
+      const amountInput = parseFloat(document.getElementById('incomeAmount').value);
+      const notes = document.getElementById('incomeNotes').value.trim();
+
+      if (!date || isNaN(amountInput) || amountInput <= 0) return showToast('Check date & amount', 'error');
+
+      const amountInLkr = convertToBaseLkr(amountInput);
+
+      const record = {
+        type: 'INCOME',
+        date,
+        category: source,
+        amount: amountInLkr,
+        notes: notes || 'General Inflow',
+        createdAt: new Date().toISOString()
+      };
+
+      try {
+        const ref = window.fbMethods.collection(window.fbDb, 'users', user.uid, 'personal_finance_records');
+        await window.fbMethods.addDoc(ref, record);
+        document.getElementById('incomeAmount').value = '';
+        document.getElementById('incomeNotes').value = '';
+        showToast(`Income Saved: +${formatMoney(amountInLkr)}`);
+      } catch (err) {
+        showToast('Failed to save income', 'error');
+      }
+    }
+
+    async function handleExpenseSubmit(e) {
+      e.preventDefault();
+      const user = window.fbAuth.currentUser;
+      if (!user) return showToast('Please sign in first', 'error');
+
+      const date = document.getElementById('expenseDate').value;
+      const category = document.getElementById('expenseCategory').value;
+      const amountInput = parseFloat(document.getElementById('expenseAmount').value);
+      const description = document.getElementById('expenseDescription').value.trim();
+
+      if (!date || isNaN(amountInput) || amountInput <= 0 || !description) return showToast('Check all fields', 'error');
+
+      const amountInLkr = convertToBaseLkr(amountInput);
+
+      const record = {
+        type: 'EXPENSE',
+        date,
+        category,
+        amount: amountInLkr,
+        notes: description,
+        createdAt: new Date().toISOString()
+      };
+
+      try {
+        const ref = window.fbMethods.collection(window.fbDb, 'users', user.uid, 'personal_finance_records');
+        await window.fbMethods.addDoc(ref, record);
+        document.getElementById('expenseAmount').value = '';
+        document.getElementById('expenseDescription').value = '';
+        showToast(`Expense Saved: -${formatMoney(amountInLkr)}`);
+      } catch (err) {
+        showToast('Failed to save expense', 'error');
+      }
+    }
+
+    function setFilter(type) {
+      currentFilter = type;
+      customStartDate = null;
+      customEndDate = null;
+      document.getElementById('filterStartDate').value = '';
+      document.getElementById('filterEndDate').value = '';
+
+      ['all', 'today', 'week', 'month'].forEach(b => {
+        const btn = document.getElementById(`btn-filter-${b}`);
+        if (b === type) {
+          btn.className = "filter-btn px-3 py-1.5 text-xs font-semibold rounded-xl border bg-indigo-600 text-white border-indigo-600 shadow-sm";
+        } else {
+          btn.className = "filter-btn px-3 py-1.5 text-xs font-medium rounded-xl border border-stone-300 dark:border-slate-700 text-stone-600 dark:text-slate-300 hover:bg-stone-100 dark:hover:bg-slate-800";
+        }
+      });
+
+      window.updateDashboard();
+    }
+
+    function applyCustomRange() {
+      const start = document.getElementById('filterStartDate').value;
+      const end = document.getElementById('filterEndDate').value;
+      if (start && end) {
+        if (start > end) return showToast('Invalid date range', 'error');
+        currentFilter = 'custom';
+        customStartDate = start;
+        customEndDate = end;
+        window.updateDashboard();
+      }
+    }
+
+    function clearCustomRange() { setFilter('all'); }
+
+    function getFilteredRecords() {
+      const records = window.financeRecords || [];
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+
+      return records.filter(r => {
+        const rDateStr = r.date || r.createdAt;
+        if (currentFilter === 'today') return rDateStr && rDateStr.startsWith(todayStr);
+        if (currentFilter === 'week') {
+          const diffDays = (now - new Date(rDateStr)) / (1000 * 60 * 60 * 24);
+          return diffDays >= 0 && diffDays <= 7;
+        }
+        if (currentFilter === 'month') return extractMonthKey(rDateStr) === todayStr.substring(0, 7);
+        if (currentFilter === 'custom' && customStartDate && customEndDate) {
+          return rDateStr >= customStartDate && rDateStr <= customEndDate;
+        }
+        return true;
+      }).sort((a, b) => new Date(b.date || b.createdAt) - new Date(a.date || a.createdAt));
+    }
+
+    window.updateDashboard = function() {
+      const filtered = getFilteredRecords();
+      let totalIncome = 0, totalExpense = 0, totalLoanPaidInPeriod = 0;
+      let incCount = 0, expCount = 0, loanCount = 0;
+
+      filtered.forEach(r => {
+        if (r.type === 'INCOME') { totalIncome += (r.amount || 0); incCount++; }
+        else if (r.type === 'EXPENSE') { totalExpense += (r.amount || 0); expCount++; }
+        else if (r.type === 'LOAN') { totalLoanPaidInPeriod += (r.amount || 0); loanCount++; }
+      });
+
+      const totalOutflow = totalExpense + totalLoanPaidInPeriod;
+      const netSurplus = totalIncome - totalOutflow;
+      const savingsRate = totalIncome > 0 ? Math.max(0, ((netSurplus / totalIncome) * 100)).toFixed(1) : 0;
+
+      document.getElementById('statIncome').textContent = formatMoney(totalIncome);
+      document.getElementById('statIncomeCount').textContent = `${incCount} logs`;
+
+      document.getElementById('statExpense').textContent = formatMoney(totalExpense);
+      document.getElementById('statExpenseCount').textContent = `${expCount} logs`;
+
+      const netEl = document.getElementById('statNetBalance');
+      const netLabel = document.getElementById('statNetLabel');
+      netEl.textContent = formatMoney(netSurplus);
+      netLabel.textContent = `Savings Rate: ${savingsRate}%`;
+
+      if (netSurplus >= 0) {
+        netEl.className = "text-base sm:text-2xl font-bold text-indigo-600 dark:text-indigo-200 truncate";
+      } else {
+        netEl.className = "text-base sm:text-2xl font-bold text-rose-600 dark:text-rose-400 truncate";
+      }
+
+      document.getElementById('footerTotalIncome').textContent = formatMoney(totalIncome);
+      document.getElementById('footerTotalOutflow').textContent = formatMoney(totalOutflow);
+      document.getElementById('footerTotalBalance').textContent = formatMoney(netSurplus);
+      document.getElementById('filteredStatsSummary').textContent = `${incCount} In, ${expCount} Ex, ${loanCount} Loans`;
+
+      renderRecords(filtered);
+      lucide.createIcons();
+    };
+
+    function renderRecords(customSet = null) {
+      const tableBody = document.getElementById('recordsTableBody');
+      const mobileList = document.getElementById('mobileRecordList');
+      const emptyState = document.getElementById('emptyState');
+      const searchVal = (document.getElementById('searchRecordsInput').value || '').toLowerCase().trim();
+      const typeFilter = document.getElementById('typeFilterSelect').value;
+
+      let list = customSet !== null ? customSet : getFilteredRecords();
+
+      if (searchVal) {
+        list = list.filter(r => {
+          return (r.category && r.category.toLowerCase().includes(searchVal)) ||
+                 (r.notes && r.notes.toLowerCase().includes(searchVal)) ||
+                 (r.date && String(r.date).includes(searchVal));
+        });
+      }
+
+      if (typeFilter !== 'ALL') list = list.filter(r => r.type === typeFilter);
+
+      document.getElementById('recordCountBadge').textContent = list.length;
+
+      if (list.length === 0) {
+        tableBody.innerHTML = '';
+        mobileList.innerHTML = '';
+        emptyState.classList.remove('hidden');
+        return;
+      }
+      emptyState.classList.add('hidden');
+
+      let tableHtml = '';
+      let mobileHtml = '';
+
+      list.forEach(r => {
+        let badgeColor = 'bg-stone-200 dark:bg-slate-800 text-stone-700 dark:text-slate-300';
+        let amountColor = 'text-stone-800 dark:text-slate-300';
+        let prefix = '';
+
+        if (r.type === 'INCOME') {
+          badgeColor = 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20';
+          amountColor = 'text-emerald-600 dark:text-emerald-400';
+          prefix = '+';
+        } else if (r.type === 'EXPENSE') {
+          badgeColor = 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20';
+          amountColor = 'text-amber-600 dark:text-amber-400';
+          prefix = '-';
+        } else if (r.type === 'LOAN') {
+          badgeColor = 'bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/20';
+          amountColor = 'text-rose-600 dark:text-rose-400';
+          prefix = '-';
+        }
+
+        const dateDisplay = formatDateDisplay(r.date || r.createdAt);
+
+        mobileHtml += `
+          <div class="py-2.5 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="text-[9px] font-bold px-1.5 py-0.2 rounded ${badgeColor}">${r.type}</span>
+                <span class="font-bold text-xs text-stone-900 dark:text-slate-200 truncate">${escapeHtml(r.category)}</span>
+                <span class="text-[10px] text-stone-400 dark:text-slate-500">· ${dateDisplay}</span>
+              </div>
+              <div class="text-[11px] text-stone-500 dark:text-slate-400 mt-0.5 truncate">${escapeHtml(r.notes || '')}</div>
+            </div>
+            <div class="text-right shrink-0 flex items-center gap-2">
+              <span class="font-bold text-xs ${amountColor}">${prefix}${formatMoney(r.amount)}</span>
+              <button onclick="deleteRecordPrompt('${r.id}')" class="text-stone-400 hover:text-rose-600 p-1">
+                <i data-lucide="trash" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+          </div>
+        `;
+
+        tableHtml += `
+          <tr class="hover:bg-stone-50 dark:hover:bg-slate-800/40 transition">
+            <td class="py-2.5 px-3 whitespace-nowrap font-medium text-stone-600 dark:text-slate-300">${dateDisplay}</td>
+            <td class="py-2.5 px-2 whitespace-nowrap">
+              <span class="px-2 py-0.5 rounded text-[10px] font-semibold ${badgeColor}">${r.type}</span>
+            </td>
+            <td class="py-2.5 px-3">
+              <div class="font-semibold text-stone-900 dark:text-slate-200">${escapeHtml(r.category)}</div>
+              <div class="text-[11px] text-stone-500 dark:text-slate-400">${escapeHtml(r.notes || '')}</div>
+            </td>
+            <td class="py-2.5 px-3 text-right font-mono font-bold whitespace-nowrap ${amountColor}">
+              ${prefix}${formatMoney(r.amount)}
+            </td>
+            <td class="py-2.5 px-2 text-center no-print">
+              <button onclick="deleteRecordPrompt('${r.id}')" class="text-stone-400 hover:text-rose-600 p-1">
+                <i data-lucide="trash" class="w-3.5 h-3.5"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      });
+
+      mobileList.innerHTML = mobileHtml;
+      tableBody.innerHTML = tableHtml;
+      lucide.createIcons();
+    }
+
+    function openPrintModal() {
+      document.getElementById('printModal').classList.remove('hidden');
+      window.populateAvailableMonths();
+      setExportScope('month');
+      lucide.createIcons();
+    }
+
+    function closePrintModal() {
+      document.getElementById('printModal').classList.add('hidden');
+    }
+
+    function setExportScope(scope) {
+      exportScope = scope;
+      const monthBtn = document.getElementById('scopeMonthBtn');
+      const allBtn = document.getElementById('scopeAllBtn');
+      const container = document.getElementById('exportMonthContainer');
+
+      if (scope === 'month') {
+        monthBtn.className = "px-2 py-1 rounded-lg bg-white shadow-sm text-stone-900 text-xs";
+        allBtn.className = "px-2 py-1 rounded-lg text-stone-600 text-xs";
+        container.classList.remove('hidden');
+      } else {
+        allBtn.className = "px-2 py-1 rounded-lg bg-white shadow-sm text-stone-900 text-xs";
+        monthBtn.className = "px-2 py-1 rounded-lg text-stone-600 text-xs";
+        container.classList.add('hidden');
+      }
+      window.renderPrintPreview();
+    }
+
+    function getActiveDatasetAndLabel() {
+      const records = window.financeRecords || [];
+      const todayStr = new Date().toISOString().split('T')[0];
+      let list = [];
+      let label = "";
+      let fileSuffix = "";
+
+      if (exportScope === 'month') {
+        const dropdown = document.getElementById('exportMonthDropdown');
+        let selMonth = dropdown ? dropdown.value : '';
+        if (!selMonth) selMonth = todayStr.substring(0, 7);
+
+        const [yr, mo] = selMonth.split('-');
+        const monthDate = new Date(parseInt(yr), parseInt(mo) - 1, 1);
+        const monthName = monthDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+
+        list = records.filter(r => extractMonthKey(r.date || r.createdAt) === selMonth);
+        label = `${monthName} Statement (${selMonth})`;
+        fileSuffix = `personal_statement_${selMonth}`;
+      } else {
+        list = [...records];
+        label = "All Financial Records";
+        fileSuffix = "personal_statement_all";
+      }
+
+      list.sort((a, b) => new Date(a.date || a.createdAt) - new Date(b.date || b.createdAt));
+      return { list, label, fileSuffix };
+    }
+
+    window.renderPrintPreview = function() {
+      const { list: dataset, label: scopeText } = getActiveDatasetAndLabel();
+      const user = window.fbAuth?.currentUser;
+      const email = user ? user.email : 'user@mail.com';
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      let inc = 0, exp = 0, loan = 0;
+      let rowsHtml = '';
+
+      if (dataset.length === 0) {
+        rowsHtml = `<tr><td colspan="4" style="padding: 20px; text-align: center; color: #78716c;">No entries for ${escapeHtml(scopeText)}.</td></tr>`;
+      } else {
+        dataset.forEach(r => {
+          if (r.type === 'INCOME') inc += r.amount;
+          else if (r.type === 'EXPENSE') exp += r.amount;
+          else if (r.type === 'LOAN') loan += r.amount;
+
+          rowsHtml += `
+            <tr style="border-bottom: 1px solid #e7e5e4; font-size: 11px;">
+              <td style="padding: 6px;">${r.date || ''}</td>
+              <td style="padding: 6px; font-weight: 700;">${r.type}</td>
+              <td style="padding: 6px;">${escapeHtml(r.category)} - <small style="color: #78716c;">${escapeHtml(r.notes || '')}</small></td>
+              <td style="padding: 6px; text-align: right; font-weight: 700;">${formatMoney(r.amount)}</td>
+            </tr>
+          `;
+        });
+      }
+
+      const surplus = inc - (exp + loan);
+
+      document.getElementById('modalPreviewCanvas').innerHTML = `
+        <div style="font-family: sans-serif; color: #1c1917;">
+          <div style="border-bottom: 2px solid #1c1917; padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between;">
+            <div>
+              <h1 style="font-size: 16px; font-weight: 900; margin: 0;">PERSONAL STATEMENT (${currentCurrency})</h1>
+              <p style="font-size: 10px; color: #57534e; margin: 2px 0 0 0;">Account: ${escapeHtml(email)}</p>
+            </div>
+            <div style="text-align: right;">
+              <div style="font-size: 12px; font-weight: 800;">${escapeHtml(scopeText)}</div>
+              <div style="font-size: 9px; color: #78716c;">Date: ${todayStr}</div>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+            <div style="flex: 1; border: 1px solid #d6d3d1; padding: 6px; border-radius: 6px;">
+              <div style="font-size: 8px; text-transform: uppercase; color: #78716c;">Inflow</div>
+              <div style="font-size: 12px; font-weight: 800; color: #047857;">${formatMoney(inc)}</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #d6d3d1; padding: 6px; border-radius: 6px;">
+              <div style="font-size: 8px; text-transform: uppercase; color: #78716c;">Expenses</div>
+              <div style="font-size: 12px; font-weight: 800; color: #b45309;">${formatMoney(exp)}</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #d6d3d1; padding: 6px; border-radius: 6px;">
+              <div style="font-size: 8px; text-transform: uppercase; color: #78716c;">Loans</div>
+              <div style="font-size: 12px; font-weight: 800; color: #be123c;">${formatMoney(loan)}</div>
+            </div>
+            <div style="flex: 1; border: 1px solid #d6d3d1; padding: 6px; border-radius: 6px;">
+              <div style="font-size: 8px; text-transform: uppercase; color: #78716c;">Surplus</div>
+              <div style="font-size: 12px; font-weight: 800; color: ${surplus >= 0 ? '#047857' : '#be123c'};">${formatMoney(surplus)}</div>
+            </div>
+          </div>
+
+          <table style="width: 100%; text-align: left; font-size: 10px; border-collapse: collapse; border: 1px solid #d6d3d1;">
+            <thead>
+              <tr style="background-color: #f5f5f4; text-transform: uppercase; font-size: 8px;">
+                <th style="padding: 6px;">Date</th>
+                <th style="padding: 6px;">Type</th>
+                <th style="padding: 6px;">Category</th>
+                <th style="padding: 6px; text-align: right;">Amount</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+      lucide.createIcons();
+    };
+
+    function triggerCompletePrint() {
+      window.renderPrintPreview();
+      window.print();
+    }
+
+    async function downloadActivePDF() {
+      window.renderPrintPreview();
+      const { list, fileSuffix } = getActiveDatasetAndLabel();
+      if (list.length === 0) return showToast('No data to export', 'error');
+
+      const btn = document.getElementById('downloadPdfBtn');
+      btn.disabled = true;
+      showToast('Generating PDF...');
+
+      const opt = {
+        margin: [8, 8, 8, 8],
+        filename: `${fileSuffix}_${currentCurrency}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+
+      try {
+        await html2pdf().set(opt).from(document.getElementById('modalPreviewCanvas')).save();
+        showToast('PDF Downloaded');
+      } catch (e) {
+        showToast('PDF error', 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function downloadActiveCSV() {
+      const { list, fileSuffix } = getActiveDatasetAndLabel();
+      if (list.length === 0) return showToast('No records to download', 'error');
+
+      const headers = ['Date', 'Type', 'Category', 'Notes', `Amount (${currentCurrency})`];
+      const rows = list.map(r => [
+        r.date || '',
+        r.type,
+        `"${(r.category || '').replace(/"/g, '""')}"`,
+        `"${(r.notes || '').replace(/"/g, '""')}"`,
+        convertFromBaseLkr(r.amount || 0).toFixed(2)
+      ]);
+
+      const csvContent = "data:text/csv;charset=utf-8," + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+      const link = document.createElement("a");
+      link.setAttribute("href", encodeURI(csvContent));
+      link.setAttribute("download", `${fileSuffix}_${currentCurrency}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast('CSV Downloaded');
+    }
+
+    function deleteRecordPrompt(docId) {
+      const user = window.fbAuth.currentUser;
+      if (!user) return;
+
+      openModal({
+        title: 'Delete Entry?',
+        desc: 'Remove from your budget?',
+        onConfirm: async () => {
+          try {
+            const docRef = window.fbMethods.doc(window.fbDb, 'users', user.uid, 'personal_finance_records', docId);
+            await window.fbMethods.deleteDoc(docRef);
+            showToast('Record deleted');
+          } catch (err) {
+            showToast('Failed to delete', 'error');
+          }
+        }
+      });
+    }
+
+    let currentModalConfirmHandler = null;
+    function openModal({ title, desc, onConfirm }) {
+      const modal = document.getElementById('confirmModal');
+      document.getElementById('modalTitle').textContent = title;
+      document.getElementById('modalDesc').textContent = desc;
+
+      currentModalConfirmHandler = () => {
+        onConfirm();
+        closeModal();
+      };
+
+      document.getElementById('modalConfirmBtn').onclick = currentModalConfirmHandler;
+      document.getElementById('modalCancelBtn').onclick = closeModal;
+      modal.classList.remove('hidden');
+      lucide.createIcons();
+    }
+
+    function closeModal() {
+      document.getElementById('confirmModal').classList.add('hidden');
+      currentModalConfirmHandler = null;
+    }
+
+    function showToast(message, type = 'success') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      const isSuccess = type === 'success';
+
+      toast.className = `px-3.5 py-2.5 rounded-xl shadow-lg border text-xs font-semibold flex items-center gap-2 pointer-events-auto ${
+        isSuccess ? 'bg-emerald-800 text-white border-emerald-700' : 'bg-rose-800 text-white border-rose-700'
+      }`;
+
+      toast.innerHTML = `<span>${message}</span>`;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 2800);
+    }
+
+    function formatDateDisplay(dateStr) {
+      if (!dateStr) return '';
+      const parts = String(dateStr).split('T')[0].split('-');
+      if (parts.length !== 3) return dateStr;
+      return `${parts[1]}/${parts[2]}`;
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+  </script>
+</body>
+</html>
